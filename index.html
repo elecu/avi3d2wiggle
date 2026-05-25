@@ -1,0 +1,959 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>avi3d2wiggle — 3DS Stereo Video Converter</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Unbounded:wght@700;900&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:     #09090f;
+  --s1:     #0f1018;
+  --s2:     #161824;
+  --s3:     #1e2134;
+  --bdr:    #2a2e46;
+  --red:    #e63e6a;
+  --teal:   #34d4c0;
+  --violet: #9b8dff;
+  --text:   #c4c8e2;
+  --dim:    #565b7a;
+  --mono:   'JetBrains Mono', monospace;
+  --title:  'Unbounded', sans-serif;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── HEADER ─────────────────────────────── */
+header {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 14px 22px;
+  border-bottom: 1px solid var(--bdr);
+  background: var(--s1);
+}
+header h1 {
+  font-family: var(--title);
+  font-size: 16px;
+  font-weight: 900;
+  letter-spacing: -0.5px;
+  color: #fff;
+  white-space: nowrap;
+}
+header h1 em { font-style: normal; color: var(--red); }
+header p { color: var(--dim); font-size: 10px; line-height: 1.5; }
+.header-badge {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+.badge {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: var(--s3);
+  color: var(--dim);
+  border: 1px solid var(--bdr);
+}
+.badge.red  { border-color: var(--red);   color: var(--red);   }
+.badge.teal { border-color: var(--teal);  color: var(--teal);  }
+
+/* ── DROP ZONE ──────────────────────────── */
+#dropzone {
+  margin: 40px auto;
+  width: min(540px, 90vw);
+  border: 2px dashed var(--bdr);
+  border-radius: 14px;
+  padding: 52px 28px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color .2s, background .2s;
+  user-select: none;
+}
+#dropzone:hover, #dropzone.over {
+  border-color: var(--teal);
+  background: rgba(52,212,192,.04);
+}
+#dropzone .dz-icon { font-size: 40px; margin-bottom: 14px; }
+#dropzone h2 {
+  font-family: var(--title);
+  font-size: 14px;
+  color: #fff;
+  margin-bottom: 8px;
+}
+#dropzone p { color: var(--dim); font-size: 11px; line-height: 1.7; }
+#dropzone small {
+  display: block;
+  margin-top: 16px;
+  font-size: 10px;
+  color: var(--dim);
+  opacity: .6;
+}
+#fileInput { display: none; }
+
+/* ── APP ────────────────────────────────── */
+#app { display: none; flex: 1; flex-direction: column; }
+
+/* ── THREE-PANEL ROW ────────────────────── */
+.panels {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 1px;
+  background: var(--bdr);
+  border-bottom: 1px solid var(--bdr);
+  flex: 1;
+}
+.panel { background: var(--s1); display: flex; flex-direction: column; min-width: 0; }
+.panel-hdr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 12px;
+  background: var(--s2);
+  border-bottom: 1px solid var(--bdr);
+  gap: 8px;
+}
+.ptag {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1.8px;
+  text-transform: uppercase;
+}
+.ptag.left    { color: var(--red);    }
+.ptag.right   { color: var(--teal);   }
+.ptag.preview { color: var(--violet); }
+.phint { color: var(--dim); font-size: 9px; font-style: italic; }
+.pbadge { color: var(--dim); font-size: 9px; }
+
+.canvas-box {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  padding: 6px;
+  min-height: 160px;
+  overflow: hidden;
+}
+canvas {
+  max-width: 100%;
+  max-height: 260px;
+  image-rendering: pixelated;
+  display: block;
+}
+#lc { cursor: crosshair; }
+
+/* ── FOCAL MARKER ────────────────────────── */
+.focal-marker {
+  position: absolute;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+}
+
+/* ── CONTROLS ────────────────────────────── */
+.ctrlbar {
+  background: var(--s1);
+  border-bottom: 1px solid var(--bdr);
+  padding: 10px 18px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.cgroup { display: flex; align-items: center; gap: 7px; }
+.clabel {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--dim);
+  white-space: nowrap;
+}
+.sep { width: 1px; height: 18px; background: var(--bdr); flex-shrink: 0; }
+.spacer { flex: 1; }
+.cval { color: var(--teal); font-size: 11px; min-width: 42px; }
+
+input[type="range"] {
+  -webkit-appearance: none;
+  width: 110px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--s3);
+  outline: none;
+  cursor: pointer;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  background: var(--teal);
+}
+
+/* buttons */
+button {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .5px;
+  padding: 6px 13px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: opacity .15s, transform .1s;
+  white-space: nowrap;
+}
+button:active:not(:disabled) { transform: scale(.97); }
+button:disabled { opacity: .3; cursor: default; }
+
+.tbtn {
+  background: var(--s3);
+  color: var(--dim);
+  border-color: var(--bdr);
+}
+.tbtn.active { color: var(--teal); border-color: var(--teal); }
+.btn-play   { background: var(--s3); color: var(--text); border-color: var(--bdr); }
+.btn-play.running { color: var(--red); border-color: var(--red); }
+.btn-export { background: var(--teal); color: #000; border-color: var(--teal); font-weight: 700; }
+.btn-export.recording { background: var(--red); border-color: var(--red); color: #fff; }
+
+/* ── STATUS BAR ──────────────────────────── */
+.statusbar {
+  background: var(--s2);
+  border-top: 1px solid var(--bdr);
+  padding: 7px 18px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+#statusMsg { color: var(--dim); font-size: 10px; flex: 1; min-width: 140px; }
+.chip { font-size: 10px; padding: 2px 8px; border-radius: 4px; background: var(--s3); white-space: nowrap; }
+.chip b { color: var(--teal); }
+#progressWrap {
+  width: 160px; height: 3px;
+  background: var(--s3);
+  border-radius: 2px;
+  overflow: hidden;
+  display: none;
+}
+#progressBar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--teal), var(--violet));
+  width: 0%;
+  transition: width .1s linear;
+}
+
+/* ── OVERLAY (error/loading) ─────────────── */
+#overlay {
+  display: none;
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,.75);
+  backdrop-filter: blur(4px);
+  z-index: 100;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 16px;
+}
+#overlay.show { display: flex; }
+#overlayMsg {
+  font-family: var(--title);
+  font-size: 15px;
+  color: #fff;
+}
+#overlayDetail { color: var(--dim); font-size: 11px; }
+.spinner {
+  width: 32px; height: 32px;
+  border: 3px solid var(--s3);
+  border-top-color: var(--teal);
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>avi<em>3d</em>2wiggle</h1>
+  <p>Nintendo 3DS stereo AVI → wiggle video</p>
+  <div class="header-badge">
+    <span class="badge red">MJPEG dual-stream</span>
+    <span class="badge teal">WebM export</span>
+  </div>
+</header>
+
+<div id="dropzone">
+  <div class="dz-icon">🎮</div>
+  <h2>Drop your 3DS AVI file here</h2>
+  <p>Supports stereo AVI files recorded with the Nintendo 3DS outer cameras<br>
+     (files containing two MJPEG streams: left eye · right eye)</p>
+  <small>Processing is done entirely in your browser — no server, no upload</small>
+  <input type="file" id="fileInput" accept=".avi,.AVI">
+</div>
+
+<div id="app">
+  <div class="panels">
+
+    <!-- Left Eye -->
+    <div class="panel">
+      <div class="panel-hdr">
+        <span class="ptag left">● LEFT EYE</span>
+        <span class="pbadge">stream 00dc · MJPEG</span>
+      </div>
+      <div class="canvas-box" id="lcBox" style="position:relative">
+        <canvas id="lc" width="480" height="240"></canvas>
+        <svg id="focalSvg" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;display:none">
+          <line id="fh" stroke="#e63e6a" stroke-width="1.5"/>
+          <line id="fv" stroke="#e63e6a" stroke-width="1.5"/>
+          <circle id="fc" fill="none" stroke="#e63e6a" stroke-width="1.5" r="6"/>
+        </svg>
+      </div>
+    </div>
+
+    <!-- Right Eye -->
+    <div class="panel">
+      <div class="panel-hdr">
+        <span class="ptag right">● RIGHT EYE</span>
+        <span class="pbadge">stream 02dc · MJPEG</span>
+      </div>
+      <div class="canvas-box">
+        <canvas id="rc" width="480" height="240"></canvas>
+      </div>
+    </div>
+
+    <!-- Wiggle Preview -->
+    <div class="panel">
+      <div class="panel-hdr">
+        <span class="ptag preview">◈ WIGGLE PREVIEW</span>
+        <span class="pbadge" id="shiftDisplay">shift: —</span>
+      </div>
+      <div class="canvas-box" id="pcBox">
+        <canvas id="pc" width="480" height="240"></canvas>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Controls -->
+  <div class="ctrlbar">
+    <div class="cgroup">
+      <span class="clabel">Speed</span>
+      <input type="range" id="speedSlider" min="10" max="400" value="80" step="5">
+      <span class="cval" id="speedDisplay">80ms</span>
+    </div>
+    <div class="sep"></div>
+    <button id="cropBtn" class="tbtn active">CROP BORDERS</button>
+    <div class="sep"></div>
+    <button id="autoFocalBtn" class="tbtn active">AUTO FOCAL</button>
+    <span style="color:var(--dim);font-size:9px;font-style:italic">← click left image to override</span>
+    <div class="spacer"></div>
+    <button id="playBtn"   class="btn-play"   disabled>▶ PREVIEW</button>
+    <button id="exportBtn" class="btn-export" disabled>⬇ EXPORT WEBM</button>
+  </div>
+
+  <!-- Status -->
+  <div class="statusbar">
+    <span id="statusMsg">Initialising…</span>
+    <span class="chip">frames: <b id="fcDisplay">—</b></span>
+    <span class="chip">dur: <b id="durDisplay">—</b></span>
+    <span class="chip">output: <b id="outSizeDisplay">—</b></span>
+    <div id="progressWrap"><div id="progressBar"></div></div>
+  </div>
+</div>
+
+<!-- Loading overlay -->
+<div id="overlay">
+  <div class="spinner" id="overlaySpinner"></div>
+  <div id="overlayMsg">Loading…</div>
+  <div id="overlayDetail"></div>
+</div>
+
+<script>
+// ─── GLOBALS ──────────────────────────────────────────────────────────────────
+const S = {
+  leftFrames:  [],   // Array<ArrayBuffer> raw JPEG bytes, left eye
+  rightFrames: [],   // Array<ArrayBuffer> raw JPEG bytes, right eye
+  halfDx:   0,       // half the stereo disparity (pixels); positive = shift right frame right
+  cropPx:   0,       // pixels to crop each side when crop enabled
+  cropOn:   true,
+  frameMs:  80,
+  playing:  false,
+  recording: false,
+  autoFocal: true,
+  filename: 'wiggle',
+  playTimer: null,
+  playIdx:  0,       // 0..2N-1, even=left odd=right
+};
+
+// DOM refs
+const dz       = document.getElementById('dropzone');
+const fileInput= document.getElementById('fileInput');
+const app      = document.getElementById('app');
+const lc       = document.getElementById('lc');
+const rc       = document.getElementById('rc');
+const pc       = document.getElementById('pc');
+const lcBox    = document.getElementById('lcBox');
+const lCtx     = lc.getContext('2d');
+const rCtx     = rc.getContext('2d');
+const pCtx     = pc.getContext('2d');
+const speedSlider   = document.getElementById('speedSlider');
+const speedDisplay  = document.getElementById('speedDisplay');
+const cropBtn       = document.getElementById('cropBtn');
+const autoFocalBtn  = document.getElementById('autoFocalBtn');
+const playBtn       = document.getElementById('playBtn');
+const exportBtn     = document.getElementById('exportBtn');
+const statusMsg     = document.getElementById('statusMsg');
+const fcDisplay     = document.getElementById('fcDisplay');
+const durDisplay    = document.getElementById('durDisplay');
+const outSizeDisplay= document.getElementById('outSizeDisplay');
+const shiftDisplay  = document.getElementById('shiftDisplay');
+const progressWrap  = document.getElementById('progressWrap');
+const progressBar   = document.getElementById('progressBar');
+const overlay       = document.getElementById('overlay');
+const overlayMsg    = document.getElementById('overlayMsg');
+const overlayDetail = document.getElementById('overlayDetail');
+const overlaySpinner= document.getElementById('overlaySpinner');
+const focalSvg      = document.getElementById('focalSvg');
+const fh = document.getElementById('fh');
+const fv = document.getElementById('fv');
+const fc = document.getElementById('fc');
+
+// ─── OVERLAY HELPERS ─────────────────────────────────────────────────────────
+function showOverlay(msg, detail = '') {
+  overlayMsg.textContent = msg;
+  overlayDetail.textContent = detail;
+  overlaySpinner.style.display = 'block';
+  overlay.classList.add('show');
+}
+function hideOverlay() { overlay.classList.remove('show'); }
+function setStatus(msg) { statusMsg.textContent = msg; }
+function setProgress(v) {
+  progressWrap.style.display = v >= 0 ? 'block' : 'none';
+  progressBar.style.width = (Math.min(1, v) * 100) + '%';
+}
+
+// ─── RIFF / AVI PARSER ───────────────────────────────────────────────────────
+// The 3DS stereo AVI contains:
+//   Stream 00dc → left eye MJPEG frames
+//   Stream 01wb → audio (ADPCM)
+//   Stream 02dc → right eye MJPEG frames
+function parseAVI(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const view  = new DataView(buffer);
+
+  const cc  = p => String.fromCharCode(bytes[p], bytes[p+1], bytes[p+2], bytes[p+3]);
+  const u32 = p => view.getUint32(p, true);
+
+  if (cc(0) !== 'RIFF') throw new Error('Not a RIFF file');
+  if (cc(8) !== 'AVI ')  throw new Error('Not an AVI file');
+
+  const leftFrames  = [];
+  const rightFrames = [];
+
+  // Walk movi chunks; handles both direct chunks and nested rec  lists
+  function walkMovi(start, end) {
+    let cur = start;
+    while (cur < end - 8) {
+      const fcc = cc(cur);
+      const sz  = u32(cur + 4);
+      const pay = cur + 8;
+
+      if      (fcc === '00dc' || fcc === '00DC') leftFrames.push(buffer.slice(pay, pay + sz));
+      else if (fcc === '02dc' || fcc === '02DC') rightFrames.push(buffer.slice(pay, pay + sz));
+      else if (fcc === 'LIST' && cc(pay) === 'rec ') walkMovi(pay + 4, pay + sz);
+
+      const adv = 8 + sz + (sz & 1);
+      if (adv < 9) break;
+      cur += adv;
+    }
+  }
+
+  // Find the movi LIST by traversing top-level RIFF chunks
+  let pos = 12;
+  const riffEnd = Math.min(8 + u32(4), bytes.length);
+  let found = false;
+
+  while (pos < riffEnd - 8 && !found) {
+    const fcc = cc(pos);
+    const sz  = u32(pos + 4);
+
+    if (fcc === 'LIST' && cc(pos + 8) === 'movi') {
+      walkMovi(pos + 12, pos + 8 + sz);
+      found = true;
+    }
+    const adv = 8 + sz + (sz & 1);
+    if (adv < 9) break;
+    pos += adv;
+  }
+
+  if (!found) throw new Error('movi chunk not found — is this a valid AVI?');
+  if (leftFrames.length  === 0) throw new Error('No left-eye frames (00dc) found');
+  if (rightFrames.length === 0) throw new Error('No right-eye frames (02dc) found');
+
+  return { leftFrames, rightFrames };
+}
+
+// ─── JPEG / BITMAP HELPERS ────────────────────────────────────────────────────
+function buf2bitmap(buf) {
+  return createImageBitmap(new Blob([buf], { type: 'image/jpeg' }));
+}
+
+async function buf2gray(buf) {
+  const bm = await buf2bitmap(buf);
+  const W = bm.width, H = bm.height;
+  const oc  = new OffscreenCanvas(W, H);
+  const ctx = oc.getContext('2d');
+  ctx.drawImage(bm, 0, 0);
+  bm.close();
+  const d = ctx.getImageData(0, 0, W, H).data;
+  const g = new Float32Array(W * H);
+  for (let i = 0; i < W * H; i++) {
+    const j = i * 4;
+    g[i] = 0.299 * d[j] + 0.587 * d[j+1] + 0.114 * d[j+2];
+  }
+  return { g, W, H };
+}
+
+// ─── AUTO SHIFT (SAD block matching, center crop, horizontal only) ────────────
+// Searches bestDx such that: left[x] ≈ right[x + bestDx]
+// For 3DS (left camera on the left), near objects appear at higher x in left image:
+//   x_left > x_right → bestDx = x_right - x_left < 0
+// halfDx = round(-bestDx / 2) > 0 → shift left image left, right image right
+async function autoShift(leftBuf, rightBuf) {
+  const { g: lG, W, H } = await buf2gray(leftBuf);
+  const { g: rG }       = await buf2gray(rightBuf);
+
+  const tX = Math.floor(W * 0.25);
+  const tY = Math.floor(H * 0.25);
+  const tW = Math.floor(W * 0.5);
+  const tH = Math.floor(H * 0.5);
+  const MAX = Math.floor(W * 0.25); // max search range
+
+  let bestDx = 0, bestSAD = Infinity;
+
+  for (let dx = -MAX; dx <= MAX; dx++) {
+    let sad = 0;
+    for (let ty = 0; ty < tH; ty += 3) {
+      for (let tx = 0; tx < tW; tx += 3) {
+        const lx = tX + tx;
+        const ly = tY + ty;
+        const rx = lx + dx;
+        if (rx < 0 || rx >= W) { sad += 180; continue; }
+        sad += Math.abs(lG[ly * W + lx] - rG[ly * W + rx]);
+      }
+    }
+    if (sad < bestSAD) { bestSAD = sad; bestDx = dx; }
+  }
+
+  return bestDx; // typically negative for 3DS (right stream shifted left)
+}
+
+// Compute shift anchored at a specific focal point (clicked on left canvas)
+async function focalShift(leftBuf, rightBuf, fx, fy) {
+  const { g: lG, W, H } = await buf2gray(leftBuf);
+  const { g: rG }       = await buf2gray(rightBuf);
+
+  const WIN = 40;
+  const SRC = 180;
+
+  const lx1 = Math.max(0, fx - WIN), lx2 = Math.min(W, fx + WIN);
+  const ly1 = Math.max(0, fy - WIN), ly2 = Math.min(H, fy + WIN);
+
+  let bestDx = 0, bestSAD = Infinity;
+
+  for (let dx = -SRC; dx <= SRC; dx++) {
+    let sad = 0, n = 0;
+    for (let ty = ly1; ty < ly2; ty += 2) {
+      for (let tx = lx1; tx < lx2; tx += 2) {
+        const rx = tx + dx;
+        if (rx < 0 || rx >= W) continue;
+        sad += Math.abs(lG[ty * W + tx] - rG[ty * W + rx]);
+        n++;
+      }
+    }
+    if (n > 0 && sad / n < bestSAD) { bestSAD = sad / n; bestDx = dx; }
+  }
+
+  return bestDx;
+}
+
+// Apply bestDx result to global state
+function applyBestDx(bestDx) {
+  // halfDx: positive means left image shifts LEFT, right image shifts RIGHT
+  S.halfDx = Math.round(-bestDx / 2);
+  S.halfDx = Math.max(-120, Math.min(120, S.halfDx)); // sanity clamp
+  S.cropPx = Math.abs(S.halfDx);
+  updateOutputSize();
+  shiftDisplay.textContent = `shift: ${S.halfDx > 0 ? '+' : ''}${S.halfDx}px · crop: ${S.cropPx}px`;
+}
+
+function updateOutputSize() {
+  const w = S.cropOn ? (480 - 2 * S.cropPx) : 480;
+  outSizeDisplay.textContent = `${w}×240`;
+  pc.width = Math.max(16, w);
+}
+
+// ─── DRAW HELPERS ────────────────────────────────────────────────────────────
+// leftDrawX  = -halfDx        (shift content left so aligned object stays at focal x)
+// rightDrawX = +halfDx        (shift content right symmetrically)
+// On cropped canvas (width = 480 - 2*cropPx):
+//   leftDrawX_crop  = -halfDx - cropPx
+//   rightDrawX_crop = +halfDx - cropPx
+
+function getDrawX(isLeft) {
+  const shift = isLeft ? -S.halfDx : S.halfDx;
+  return S.cropOn ? (shift - S.cropPx) : shift;
+}
+
+function drawBitmapToCtx(ctx, bitmap, isLeft) {
+  ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+  ctx.drawImage(bitmap, getDrawX(isLeft), 0);
+}
+
+// Draw the first frame pair in the left / right preview panels (no shift applied,
+// just to show the raw frames) and in the preview canvas (with shift for wiggle).
+async function showFirstFrames() {
+  if (!S.leftFrames.length) return;
+
+  const lb = await buf2bitmap(S.leftFrames[0]);
+  const rb = await buf2bitmap(S.rightFrames[0]);
+
+  lCtx.clearRect(0, 0, 480, 240);
+  lCtx.drawImage(lb, 0, 0);
+
+  rCtx.clearRect(0, 0, 480, 240);
+  rCtx.drawImage(rb, 0, 0);
+
+  // Preview: show wiggle of first frame
+  updateOutputSize();
+  drawBitmapToCtx(pCtx, lb, true);
+
+  lb.close(); rb.close();
+}
+
+// Draw focal point crosshair on the left canvas SVG overlay.
+// The SVG covers the entire lcBox (position:absolute 100%×100%), but the
+// canvas is centred inside the box via flexbox — so we must add the canvas
+// offset relative to the box to get the correct SVG coordinates.
+function drawFocalMarker(imgX, imgY) {
+  S.focalImgX = imgX;
+  S.focalImgY = imgY;
+
+  const boxRect = lcBox.getBoundingClientRect();
+  const lcRect  = lc.getBoundingClientRect();
+
+  // Canvas offset within the box (due to flex centering + padding)
+  const offX = lcRect.left - boxRect.left;
+  const offY = lcRect.top  - boxRect.top;
+
+  const scaleX = lcRect.width  / 480;
+  const scaleY = lcRect.height / 240;
+
+  const cx = offX + imgX * scaleX;
+  const cy = offY + imgY * scaleY;
+  const bw = boxRect.width;
+  const bh = boxRect.height;
+  const R  = 8;
+
+  focalSvg.style.display = 'block';
+  fh.setAttribute('x1', 0);   fh.setAttribute('y1', cy);
+  fh.setAttribute('x2', bw);  fh.setAttribute('y2', cy);
+  fv.setAttribute('x1', cx);  fv.setAttribute('y1', 0);
+  fv.setAttribute('x2', cx);  fv.setAttribute('y2', bh);
+  fc.setAttribute('cx', cx);  fc.setAttribute('cy', cy);
+  fc.setAttribute('r',  R);
+}
+
+// ─── PLAYBACK ────────────────────────────────────────────────────────────────
+async function playStep() {
+  if (!S.playing) return;
+  const N = S.leftFrames.length;
+  const pair   = Math.floor(S.playIdx / 2);
+  const isLeft = (S.playIdx % 2) === 0;
+  const buf    = isLeft ? S.leftFrames[pair] : S.rightFrames[pair];
+
+  try {
+    const bm = await buf2bitmap(buf);
+    drawBitmapToCtx(pCtx, bm, isLeft);
+    bm.close();
+  } catch (_) { /* skip bad frame */ }
+
+  S.playIdx = (S.playIdx + 1) % (N * 2);
+  S.playTimer = setTimeout(playStep, S.frameMs);
+}
+
+function startPlay() {
+  if (S.playing) return;
+  S.playing = true;
+  S.playIdx = 0;
+  playBtn.textContent = '■ STOP';
+  playBtn.classList.add('running');
+  playStep();
+}
+
+function stopPlay() {
+  S.playing = false;
+  if (S.playTimer) clearTimeout(S.playTimer);
+  playBtn.textContent = '▶ PREVIEW';
+  playBtn.classList.remove('running');
+}
+
+// ─── EXPORT (MediaRecorder + canvas captureStream) ────────────────────────────
+async function startExport() {
+  if (S.recording) return;
+
+  const N       = S.leftFrames.length;
+  const cropPx  = S.cropOn ? S.cropPx : 0;
+  const outW    = Math.max(16, 480 - 2 * cropPx);
+  const outH    = 240;
+  const fps     = Math.round(1000 / S.frameMs);
+
+  // Create a dedicated off-screen canvas for recording
+  const expCanvas = document.createElement('canvas');
+  expCanvas.width  = outW;
+  expCanvas.height = outH;
+  expCanvas.style.cssText = 'position:fixed;top:-9999px;left:-9999px;';
+  document.body.appendChild(expCanvas);
+  const expCtx = expCanvas.getContext('2d');
+
+  // Determine best supported codec
+  const mimeTypes = [
+    'video/webm;codecs=vp9',
+    'video/webm;codecs=vp8',
+    'video/webm',
+  ];
+  let mimeType = mimeTypes.find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
+
+  const stream = expCanvas.captureStream(fps);
+  const videoTrack = stream.getVideoTracks()[0];
+  const recorder = new MediaRecorder(stream, {
+    mimeType,
+    videoBitsPerSecond: 5_000_000,
+  });
+
+  const chunks = [];
+  recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+
+  S.recording = true;
+  exportBtn.textContent = '⏹ STOP REC';
+  exportBtn.classList.add('recording');
+  setStatus(`Recording: ${N} frame pairs at ${fps}fps…`);
+  setProgress(0);
+  progressWrap.style.display = 'block';
+
+  recorder.start();
+
+  // Compute draw offsets for the export canvas
+  const leftX  = -S.halfDx - cropPx;
+  const rightX =  S.halfDx - cropPx;
+
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  for (let i = 0; i < N && S.recording; i++) {
+    // Left frame
+    try {
+      const lb = await buf2bitmap(S.leftFrames[i]);
+      expCtx.clearRect(0, 0, outW, outH);
+      expCtx.drawImage(lb, leftX, 0);
+      lb.close();
+      if (videoTrack.requestFrame) videoTrack.requestFrame();
+    } catch (_) {}
+    await sleep(S.frameMs);
+
+    // Right frame
+    try {
+      const rb = await buf2bitmap(S.rightFrames[i]);
+      expCtx.clearRect(0, 0, outW, outH);
+      expCtx.drawImage(rb, rightX, 0);
+      rb.close();
+      if (videoTrack.requestFrame) videoTrack.requestFrame();
+    } catch (_) {}
+    await sleep(S.frameMs);
+
+    setProgress((i + 1) / N);
+  }
+
+  recorder.stop();
+  await new Promise(r => { recorder.onstop = r; });
+  document.body.removeChild(expCanvas);
+
+  S.recording = false;
+  exportBtn.textContent = '⬇ EXPORT WEBM';
+  exportBtn.classList.remove('recording');
+  setProgress(-1);
+
+  if (chunks.length > 0) {
+    const blob = new Blob(chunks, { type: mimeType });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = S.filename + '_wiggle.webm';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    setStatus(`Exported: ${S.filename}_wiggle.webm (${(blob.size / 1024 / 1024).toFixed(1)} MB)`);
+  } else {
+    setStatus('Export failed: no data recorded (try a different browser)');
+  }
+}
+
+function stopExport() {
+  S.recording = false;
+  exportBtn.textContent = '⬇ EXPORT WEBM';
+  exportBtn.classList.remove('recording');
+  setStatus('Export cancelled');
+  setProgress(-1);
+}
+
+// ─── MAIN FILE HANDLER ────────────────────────────────────────────────────────
+async function handleFile(file) {
+  stopPlay();
+
+  S.filename = file.name.replace(/\.[^.]+$/, '');
+  dz.style.display    = 'none';
+  app.style.display   = 'flex';
+
+  showOverlay('Parsing AVI…', file.name);
+
+  let leftFrames, rightFrames;
+  try {
+    const buf = await file.arrayBuffer();
+    ({ leftFrames, rightFrames } = parseAVI(buf));
+  } catch (err) {
+    hideOverlay();
+    setStatus(`Error: ${err.message}`);
+    return;
+  }
+
+  S.leftFrames  = leftFrames;
+  S.rightFrames = rightFrames;
+
+  const N   = leftFrames.length;
+  const dur = (N / 20).toFixed(2); // 20fps
+
+  fcDisplay.textContent  = N;
+  durDisplay.textContent = `${dur}s`;
+
+  overlayMsg.textContent    = 'Computing stereo alignment…';
+  overlayDetail.textContent = 'SAD block matching on first frame pair';
+
+  let bestDx;
+  try {
+    bestDx = await autoShift(leftFrames[0], rightFrames[0]);
+  } catch (_) {
+    bestDx = 0;
+  }
+  applyBestDx(bestDx);
+
+  overlayMsg.textContent    = 'Decoding preview frames…';
+  overlayDetail.textContent = '';
+  await showFirstFrames();
+
+  hideOverlay();
+  setStatus(`Loaded ${N} frame pairs · disparity ~${Math.abs(bestDx)}px · halfDx=${S.halfDx}px`);
+  playBtn.disabled   = false;
+  exportBtn.disabled = false;
+}
+
+// ─── UI EVENT HANDLERS ───────────────────────────────────────────────────────
+
+// Drag & drop
+dz.addEventListener('click', () => fileInput.click());
+dz.addEventListener('dragover',  e => { e.preventDefault(); dz.classList.add('over'); });
+dz.addEventListener('dragleave', () => dz.classList.remove('over'));
+dz.addEventListener('drop', e => {
+  e.preventDefault();
+  dz.classList.remove('over');
+  const f = e.dataTransfer.files[0];
+  if (f) handleFile(f);
+});
+fileInput.addEventListener('change', e => {
+  const f = e.target.files[0];
+  if (f) handleFile(f);
+});
+
+// Speed slider
+speedSlider.addEventListener('input', () => {
+  S.frameMs = parseInt(speedSlider.value);
+  speedDisplay.textContent = S.frameMs + 'ms';
+});
+
+// Crop toggle
+cropBtn.addEventListener('click', () => {
+  S.cropOn = !S.cropOn;
+  cropBtn.classList.toggle('active', S.cropOn);
+  updateOutputSize();
+  if (S.leftFrames.length) showFirstFrames();
+});
+
+// Auto focal toggle
+autoFocalBtn.addEventListener('click', () => {
+  S.autoFocal = !S.autoFocal;
+  autoFocalBtn.classList.toggle('active', S.autoFocal);
+  if (S.autoFocal) {
+    focalSvg.style.display = 'none';
+    if (S.leftFrames.length) {
+      showOverlay('Recomputing auto alignment…', '');
+      autoShift(S.leftFrames[0], S.rightFrames[0]).then(dx => {
+        applyBestDx(dx);
+        showFirstFrames();
+        hideOverlay();
+        setStatus(`Auto shift: halfDx=${S.halfDx}px`);
+      });
+    }
+  }
+});
+
+// Click on left canvas → set manual focal point
+lc.addEventListener('click', async e => {
+  if (!S.leftFrames.length) return;
+  S.autoFocal = false;
+  autoFocalBtn.classList.remove('active');
+
+  const rect   = lc.getBoundingClientRect();
+  const imgX   = Math.round(e.offsetX * (480 / rect.width));
+  const imgY   = Math.round(e.offsetY * (240 / rect.height));
+
+  drawFocalMarker(imgX, imgY);
+  setStatus(`Computing focal shift at (${imgX}, ${imgY})…`);
+
+  const dx = await focalShift(S.leftFrames[0], S.rightFrames[0], imgX, imgY);
+  applyBestDx(dx);
+  await showFirstFrames();
+  setStatus(`Focal point (${imgX},${imgY}) · halfDx=${S.halfDx}px`);
+});
+
+// Redraw focal marker on resize using stored image coords
+window.addEventListener('resize', () => {
+  if (focalSvg.style.display !== 'none' && S.focalImgX !== undefined) {
+    drawFocalMarker(S.focalImgX, S.focalImgY);
+  }
+});
+
+// Play button
+playBtn.addEventListener('click', () => {
+  if (S.playing) stopPlay();
+  else           startPlay();
+});
+
+// Export button
+exportBtn.addEventListener('click', () => {
+  if (S.recording) stopExport();
+  else             startExport();
+});
+</script>
+</body>
+</html>
