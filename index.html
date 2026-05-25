@@ -241,6 +241,17 @@ button:disabled { opacity: .3; cursor: default; }
 }
 #audioRow.visible { display: flex; }
 
+#enhRow {
+  background: var(--s1);
+  border-bottom: 1px solid var(--bdr);
+  padding: 8px 18px;
+  display: none;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+#enhRow.visible { display: flex; }
+
 /* ── STATUS BAR ──────────────────────────── */
 .statusbar {
   background: var(--s2);
@@ -372,15 +383,12 @@ button:disabled { opacity: .3; cursor: default; }
     <div class="sep"></div>
     <button id="autoFocalBtn" class="tbtn active">AUTO FOCAL</button>
     <span style="color:var(--dim);font-size:9px;font-style:italic">← click left image to override</span>
-    <div class="sep"></div>
-    <button id="audioBtn"  class="tbtn active" style="display:none">🔊 AUDIO</button>
-    <button id="syncBtn"   class="tbtn"        style="display:none">SYNC SPEED</button>
     <div class="spacer"></div>
     <button id="playBtn"   class="btn-play"   disabled>▶ PREVIEW</button>
     <button id="exportBtn" class="btn-export" disabled>⬇ EXPORT</button>
   </div>
 
-  <!-- Audio / Output options row -->
+  <!-- Audio options row -->
   <div id="audioRow">
     <div class="cgroup">
       <span class="clabel">Audio</span>
@@ -396,6 +404,35 @@ button:disabled { opacity: .3; cursor: default; }
     <div class="sep"></div>
     <button id="syncBtn" class="tbtn" style="display:none">SYNC SPEED</button>
     <span id="syncHint" style="color:var(--dim);font-size:9px;display:none"></span>
+  </div>
+
+  <!-- Image enhancement row -->
+  <div id="enhRow">
+    <div class="cgroup">
+      <span class="clabel">Enhance</span>
+      <button id="enhSharpenBtn" class="tbtn">SHARPEN</button>
+      <button id="enhAutoBtn"    class="tbtn">3DS AUTO</button>
+    </div>
+    <div class="sep"></div>
+    <div class="cgroup">
+      <span class="clabel">Contrast</span>
+      <input type="range" id="contrastSlider" min="80" max="220" value="100" step="5">
+      <span class="cval" id="contrastDisplay">1.0×</span>
+    </div>
+    <div class="sep"></div>
+    <div class="cgroup">
+      <span class="clabel">Saturate</span>
+      <input type="range" id="satSlider" min="50" max="300" value="100" step="5">
+      <span class="cval" id="satDisplay">1.0×</span>
+    </div>
+    <div class="sep"></div>
+    <div class="cgroup">
+      <span class="clabel">Bright</span>
+      <input type="range" id="brightSlider" min="70" max="160" value="100" step="5">
+      <span class="cval" id="brightDisplay">1.0×</span>
+    </div>
+    <div class="sep"></div>
+    <button id="enhResetBtn" class="tbtn">RESET</button>
   </div>
 
   <!-- Status -->
@@ -436,6 +473,10 @@ const S = {
   pitchSemitones: 0,   // additional pitch offset in semitones
   syncMs:   0,       // frameMs that makes output duration = audio duration
   audioDurMs: 0,     // decoded audio duration in ms
+  enhSharpen:   false,
+  enhContrast:  1.0,
+  enhSat:       1.0,
+  enhBright:    1.0,
 };
 
 // DOM refs
@@ -459,7 +500,17 @@ const pitchSlider      = document.getElementById('pitchSlider');
 const pitchDisplay     = document.getElementById('pitchDisplay');
 const syncBtn          = document.getElementById('syncBtn');
 const syncHint         = document.getElementById('syncHint');
-const audioRow         = document.getElementById('audioRow');
+const enhRow         = document.getElementById('enhRow');
+const enhSharpenBtn  = document.getElementById('enhSharpenBtn');
+const enhAutoBtn     = document.getElementById('enhAutoBtn');
+const enhResetBtn    = document.getElementById('enhResetBtn');
+const contrastSlider = document.getElementById('contrastSlider');
+const contrastDisplay= document.getElementById('contrastDisplay');
+const satSlider      = document.getElementById('satSlider');
+const satDisplay     = document.getElementById('satDisplay');
+const brightSlider   = document.getElementById('brightSlider');
+const brightDisplay  = document.getElementById('brightDisplay');
+const audioRow       = document.getElementById('audioRow');
 const playBtn          = document.getElementById('playBtn');
 const exportBtn     = document.getElementById('exportBtn');
 const statusMsg     = document.getElementById('statusMsg');
@@ -585,7 +636,7 @@ function decodeAdpcmChunk(buf) {
     for (let half = 0; half < 2 && si < nSamp; half++) {
       const nib  = half === 0 ? (b[i] & 0xF) : ((b[i] >> 4) & 0xF);
       const step = IMA_STEP[stepIdx];
-      const diff = (step >> 3) | ((nib & 4) ? step : 0) | ((nib & 2) ? (step >> 1) : 0) | ((nib & 1) ? (step >> 2) : 0);
+      const diff = (step >> 3) + ((nib & 4) ? step : 0) + ((nib & 2) ? (step >> 1) : 0) + ((nib & 1) ? (step >> 2) : 0);
       pred       = Math.max(-32768, Math.min(32767, pred + (nib & 8 ? -diff : diff)));
       stepIdx    = Math.max(0, Math.min(88, stepIdx + IMA_IDX[nib & 7]));
       out[si++]  = pred / 32768;
@@ -743,6 +794,7 @@ async function showFirstFrames() {
   // Preview: show wiggle of first frame
   updateOutputSize();
   drawBitmapToCtx(pCtx, lb, true);
+  applyEnhancement(pCtx, pc.width, pc.height);
 
   lb.close(); rb.close();
 }
@@ -780,6 +832,53 @@ function drawFocalMarker(imgX, imgY) {
   fc.setAttribute('r',  R);
 }
 
+// ─── IMAGE ENHANCEMENT ───────────────────────────────────────────────────────
+function buildFilter() {
+  const parts = [];
+  if (S.enhBright   !== 1.0) parts.push(`brightness(${S.enhBright.toFixed(2)})`);
+  if (S.enhContrast !== 1.0) parts.push(`contrast(${S.enhContrast.toFixed(2)})`);
+  if (S.enhSat      !== 1.0) parts.push(`saturate(${S.enhSat.toFixed(2)})`);
+  return parts.length ? parts.join(' ') : 'none';
+}
+
+// Unsharp mask: center pixel boosted, 4-neighbours subtracted (strength 0–1)
+function applySharpen(ctx, w, h, strength = 0.45) {
+  const id  = ctx.getImageData(0, 0, w, h);
+  const src = id.data;
+  const dst = new Uint8ClampedArray(src);
+  const s   = strength;
+  const c   = 1 + 4 * s;
+
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = (y * w + x) * 4;
+      for (let k = 0; k < 3; k++) {
+        dst[i + k] = Math.max(0, Math.min(255,
+          c * src[i + k]
+          - s * src[((y-1)*w + x    ) * 4 + k]
+          - s * src[((y+1)*w + x    ) * 4 + k]
+          - s * src[(y*w     + x - 1) * 4 + k]
+          - s * src[(y*w     + x + 1) * 4 + k]
+        ));
+      }
+    }
+  }
+  ctx.putImageData(new ImageData(dst, w, h), 0, 0);
+}
+
+function applyEnhancement(ctx, w, h) {
+  const f = buildFilter();
+  if (f !== 'none') {
+    const tmp = new OffscreenCanvas(w, h);
+    tmp.getContext('2d').drawImage(ctx.canvas, 0, 0);
+    ctx.clearRect(0, 0, w, h);   // clear first, filter not yet set
+    ctx.filter = f;
+    ctx.drawImage(tmp, 0, 0);
+    ctx.filter = 'none';
+  }
+  if (S.enhSharpen) applySharpen(ctx, w, h);
+}
+
 // ─── PLAYBACK ────────────────────────────────────────────────────────────────
 async function playStep() {
   if (!S.playing) return;
@@ -792,6 +891,7 @@ async function playStep() {
     const bm = await buf2bitmap(buf);
     drawBitmapToCtx(pCtx, bm, isLeft);
     bm.close();
+    applyEnhancement(pCtx, pc.width, pc.height);
   } catch (_) { /* skip bad frame */ }
 
   S.playIdx = (S.playIdx + 1) % (N * 2);
@@ -903,6 +1003,7 @@ async function startExport() {
   function drawFrameToExport(bitmap, isLeft) {
     expCtx.clearRect(0, 0, outW, outH);
     expCtx.drawImage(bitmap, isLeft ? leftX : rightX, 0);
+    applyEnhancement(expCtx, outW, outH);
   }
 
   for (let i = 0; i < N && S.recording; i++) {
@@ -961,6 +1062,14 @@ function stopExport() {
 // ─── MAIN FILE HANDLER ────────────────────────────────────────────────────────
 async function handleFile(file) {
   stopPlay();
+  stopExport();
+
+  // Reset focal marker from previous file
+  focalSvg.style.display = 'none';
+  S.focalImgX = undefined;
+  S.focalImgY = undefined;
+  S.autoFocal = true;
+  autoFocalBtn.classList.add('active');
 
   S.filename = file.name.replace(/\.[^.]+$/, '');
   dz.style.display    = 'none';
@@ -995,14 +1104,21 @@ async function handleFile(file) {
     syncHint.textContent   = `audio: ${(S.audioDurMs / 1000).toFixed(1)}s`;
   } else {
     S.audioDurMs = 0;
-    S.syncMs     = 0;
+    // No audio: match original video duration (N frames @ 20fps → 25ms per wiggle frame)
+    S.syncMs     = Math.round(1000 / (20 * 2));
     syncBtn.style.display  = 'none';
     syncHint.style.display = 'none';
   }
 
+  // Apply sync speed as default
+  S.frameMs = S.syncMs;
+  speedSlider.value = Math.min(400, Math.max(10, S.syncMs));
+  speedDisplay.textContent = S.syncMs + 'ms';
+
   audioBtn.style.display = audioChunks.length > 0 ? '' : 'none';
   audioBtn.classList.toggle('active', S.audioOn);
   audioRow.classList.add('visible');
+  enhRow.classList.add('visible');
 
   fcDisplay.textContent  = N;
   durDisplay.textContent = `${dur}s`;
@@ -1101,6 +1217,64 @@ window.addEventListener('resize', () => {
   if (focalSvg.style.display !== 'none' && S.focalImgX !== undefined) {
     drawFocalMarker(S.focalImgX, S.focalImgY);
   }
+});
+
+// ─── ENHANCE EVENT HANDLERS ──────────────────────────────────────────────────
+let _enhDebounce = null;
+function enhPreview() {
+  clearTimeout(_enhDebounce);
+  _enhDebounce = setTimeout(() => { if (S.leftFrames.length) showFirstFrames(); }, 80);
+}
+function refreshEnhanceUI() {
+  contrastSlider.value  = Math.round(S.enhContrast * 100);
+  satSlider.value       = Math.round(S.enhSat * 100);
+  brightSlider.value    = Math.round(S.enhBright * 100);
+  contrastDisplay.textContent = S.enhContrast.toFixed(1) + '×';
+  satDisplay.textContent      = S.enhSat.toFixed(1) + '×';
+  brightDisplay.textContent   = S.enhBright.toFixed(1) + '×';
+  enhSharpenBtn.classList.toggle('active', S.enhSharpen);
+}
+
+enhSharpenBtn.addEventListener('click', () => {
+  S.enhSharpen = !S.enhSharpen;
+  enhSharpenBtn.classList.toggle('active', S.enhSharpen);
+  enhPreview();
+});
+
+enhAutoBtn.addEventListener('click', () => {
+  S.enhSharpen  = true;
+  S.enhContrast = 1.3;
+  S.enhSat      = 1.5;
+  S.enhBright   = 1.05;
+  refreshEnhanceUI();
+  enhPreview();
+});
+
+enhResetBtn.addEventListener('click', () => {
+  S.enhSharpen  = false;
+  S.enhContrast = 1.0;
+  S.enhSat      = 1.0;
+  S.enhBright   = 1.0;
+  refreshEnhanceUI();
+  enhPreview();
+});
+
+contrastSlider.addEventListener('input', () => {
+  S.enhContrast = parseInt(contrastSlider.value) / 100;
+  contrastDisplay.textContent = S.enhContrast.toFixed(1) + '×';
+  enhPreview();
+});
+
+satSlider.addEventListener('input', () => {
+  S.enhSat = parseInt(satSlider.value) / 100;
+  satDisplay.textContent = S.enhSat.toFixed(1) + '×';
+  enhPreview();
+});
+
+brightSlider.addEventListener('input', () => {
+  S.enhBright = parseInt(brightSlider.value) / 100;
+  brightDisplay.textContent = S.enhBright.toFixed(1) + '×';
+  enhPreview();
 });
 
 // Audio toggle
