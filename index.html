@@ -229,6 +229,18 @@ button:disabled { opacity: .3; cursor: default; }
 .btn-export { background: var(--teal); color: #000; border-color: var(--teal); font-weight: 700; }
 .btn-export.recording { background: var(--red); border-color: var(--red); color: #fff; }
 
+/* ── AUDIO / OUTPUT ROW ─────────────────────── */
+#audioRow {
+  background: var(--s2);
+  border-bottom: 1px solid var(--bdr);
+  padding: 8px 18px;
+  display: none;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+#audioRow.visible { display: flex; }
+
 /* ── STATUS BAR ──────────────────────────── */
 .statusbar {
   background: var(--s2);
@@ -360,9 +372,30 @@ button:disabled { opacity: .3; cursor: default; }
     <div class="sep"></div>
     <button id="autoFocalBtn" class="tbtn active">AUTO FOCAL</button>
     <span style="color:var(--dim);font-size:9px;font-style:italic">← click left image to override</span>
+    <div class="sep"></div>
+    <button id="audioBtn"  class="tbtn active" style="display:none">🔊 AUDIO</button>
+    <button id="syncBtn"   class="tbtn"        style="display:none">SYNC SPEED</button>
     <div class="spacer"></div>
     <button id="playBtn"   class="btn-play"   disabled>▶ PREVIEW</button>
-    <button id="exportBtn" class="btn-export" disabled>⬇ EXPORT WEBM</button>
+    <button id="exportBtn" class="btn-export" disabled>⬇ EXPORT</button>
+  </div>
+
+  <!-- Audio / Output options row -->
+  <div id="audioRow">
+    <div class="cgroup">
+      <span class="clabel">Audio</span>
+      <button id="audioBtn" class="tbtn active">🔊 ON</button>
+      <button id="preservePitchBtn" class="tbtn active">PRESERVE PITCH</button>
+    </div>
+    <div class="sep"></div>
+    <div class="cgroup">
+      <span class="clabel">Pitch</span>
+      <input type="range" id="pitchSlider" min="-12" max="12" value="0" step="1">
+      <span class="cval" id="pitchDisplay">0 st</span>
+    </div>
+    <div class="sep"></div>
+    <button id="syncBtn" class="tbtn" style="display:none">SYNC SPEED</button>
+    <span id="syncHint" style="color:var(--dim);font-size:9px;display:none"></span>
   </div>
 
   <!-- Status -->
@@ -397,6 +430,12 @@ const S = {
   filename: 'wiggle',
   playTimer: null,
   playIdx:  0,       // 0..2N-1, even=left odd=right
+  audioChunks: [],   // Array<ArrayBuffer> raw IMA ADPCM blocks (01wb)
+  audioOn:  true,    // include audio in export
+  preservePitch: true, // compensate pitch when time-stretching
+  pitchSemitones: 0,   // additional pitch offset in semitones
+  syncMs:   0,       // frameMs that makes output duration = audio duration
+  audioDurMs: 0,     // decoded audio duration in ms
 };
 
 // DOM refs
@@ -414,7 +453,14 @@ const speedSlider   = document.getElementById('speedSlider');
 const speedDisplay  = document.getElementById('speedDisplay');
 const cropBtn       = document.getElementById('cropBtn');
 const autoFocalBtn  = document.getElementById('autoFocalBtn');
-const playBtn       = document.getElementById('playBtn');
+const audioBtn         = document.getElementById('audioBtn');
+const preservePitchBtn = document.getElementById('preservePitchBtn');
+const pitchSlider      = document.getElementById('pitchSlider');
+const pitchDisplay     = document.getElementById('pitchDisplay');
+const syncBtn          = document.getElementById('syncBtn');
+const syncHint         = document.getElementById('syncHint');
+const audioRow         = document.getElementById('audioRow');
+const playBtn          = document.getElementById('playBtn');
 const exportBtn     = document.getElementById('exportBtn');
 const statusMsg     = document.getElementById('statusMsg');
 const fcDisplay     = document.getElementById('fcDisplay');
@@ -463,6 +509,7 @@ function parseAVI(buffer) {
 
   const leftFrames  = [];
   const rightFrames = [];
+  const audioChunks = [];
 
   // Walk movi chunks; handles both direct chunks and nested rec  lists
   function walkMovi(start, end) {
@@ -474,6 +521,7 @@ function parseAVI(buffer) {
 
       if      (fcc === '00dc' || fcc === '00DC') leftFrames.push(buffer.slice(pay, pay + sz));
       else if (fcc === '02dc' || fcc === '02DC') rightFrames.push(buffer.slice(pay, pay + sz));
+      else if (fcc === '01wb' || fcc === '01WB') audioChunks.push(buffer.slice(pay, pay + sz));
       else if (fcc === 'LIST' && cc(pay) === 'rec ') walkMovi(pay + 4, pay + sz);
 
       const adv = 8 + sz + (sz & 1);
@@ -504,7 +552,61 @@ function parseAVI(buffer) {
   if (leftFrames.length  === 0) throw new Error('No left-eye frames (00dc) found');
   if (rightFrames.length === 0) throw new Error('No right-eye frames (02dc) found');
 
-  return { leftFrames, rightFrames };
+  return { leftFrames, rightFrames, audioChunks };
+}
+
+// ─── IMA ADPCM DECODER ───────────────────────────────────────────────────────
+// 3DS audio: adpcm_ima_wav, 16000 Hz, 1ch — each 01wb chunk is one ADPCM block.
+// Block layout: int16 predictor + uint8 stepIndex + uint8 pad + nibble pairs.
+const IMA_STEP = [
+  7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,50,55,60,66,
+  73,80,88,97,107,118,130,143,157,173,190,209,230,253,279,307,337,371,408,
+  449,494,544,598,658,724,796,876,963,1060,1166,1282,1411,1552,1707,1878,
+  2066,2272,2499,2749,3024,3327,3660,4026,4428,4871,5358,5894,6484,7132,
+  7845,8630,9493,10442,11487,12635,13899,15289,16818,18500,20350,22385,
+  24623,27086,29794,32767
+];
+const IMA_IDX = [-1,-1,-1,-1,2,4,6,8,-1,-1,-1,-1,2,4,6,8];
+
+function decodeAdpcmChunk(buf) {
+  const b   = new Uint8Array(buf);
+  const v   = new DataView(buf);
+  const len = b.length;
+  if (len < 4) return new Float32Array(0);
+
+  let pred     = v.getInt16(0, true);
+  let stepIdx  = Math.max(0, Math.min(88, b[2]));
+  const nSamp  = (len - 4) * 2 + 1;
+  const out    = new Float32Array(nSamp);
+  out[0]       = pred / 32768;
+
+  let si = 1;
+  for (let i = 4; i < len; i++) {
+    for (let half = 0; half < 2 && si < nSamp; half++) {
+      const nib  = half === 0 ? (b[i] & 0xF) : ((b[i] >> 4) & 0xF);
+      const step = IMA_STEP[stepIdx];
+      const diff = (step >> 3) | ((nib & 4) ? step : 0) | ((nib & 2) ? (step >> 1) : 0) | ((nib & 1) ? (step >> 2) : 0);
+      pred       = Math.max(-32768, Math.min(32767, pred + (nib & 8 ? -diff : diff)));
+      stepIdx    = Math.max(0, Math.min(88, stepIdx + IMA_IDX[nib & 7]));
+      out[si++]  = pred / 32768;
+    }
+  }
+  return out;
+}
+
+// Decode all audio chunks into a Web Audio AudioBuffer (16 kHz, mono).
+// Returns null if no audio chunks available.
+function decodeAllAudio(audioChunks) {
+  if (!audioChunks.length) return null;
+  const RATE    = 16000;
+  const blocks  = audioChunks.map(decodeAdpcmChunk);
+  const total   = blocks.reduce((a, b) => a + b.length, 0);
+  const actx    = new AudioContext({ sampleRate: RATE });
+  const abuf    = actx.createBuffer(1, total, RATE);
+  const chan     = abuf.getChannelData(0);
+  let offset    = 0;
+  for (const b of blocks) { chan.set(b, offset); offset += b.length; }
+  return { actx, abuf, duration: total / RATE };
 }
 
 // ─── JPEG / BITMAP HELPERS ────────────────────────────────────────────────────
@@ -716,13 +818,45 @@ function stopPlay() {
 async function startExport() {
   if (S.recording) return;
 
-  const N       = S.leftFrames.length;
-  const cropPx  = S.cropOn ? S.cropPx : 0;
-  const outW    = Math.max(16, 480 - 2 * cropPx);
-  const outH    = 240;
-  const fps     = Math.round(1000 / S.frameMs);
+  const N      = S.leftFrames.length;
+  const cropPx = S.cropOn ? S.cropPx : 0;
+  const outW   = Math.max(16, 480 - 2 * cropPx);
+  const outH   = 240;
+  const leftX  = -S.halfDx - cropPx;
+  const rightX =  S.halfDx - cropPx;
 
-  // Create a dedicated off-screen canvas for recording
+  // ── Audio setup ───────────────────────────────────────────────────────────
+  let audioCtx = null, audioSource = null, audioStream = null;
+
+  if (S.audioOn && S.audioChunks.length) {
+    try {
+      const decoded = decodeAllAudio(S.audioChunks);
+      if (decoded) {
+        audioCtx = decoded.actx;
+
+        // Time-stretch: audio must fill the full video duration
+        const videoDurMs   = N * 2 * S.frameMs;
+        const playbackRate = Math.max(0.1, Math.min(10,
+          decoded.duration * 1000 / videoDurMs
+        ));
+
+        // Pitch: preserve = compensate the rate change; semitones = user offset
+        const rateCompCents  = S.preservePitch
+          ? -Math.round(Math.log2(playbackRate) * 1200)
+          : 0;
+        const totalDetune = rateCompCents + S.pitchSemitones * 100;
+
+        const dest = audioCtx.createMediaStreamDestination();
+        audioSource = audioCtx.createBufferSource();
+        audioSource.buffer = decoded.abuf;
+        audioSource.playbackRate.value = playbackRate;
+        audioSource.detune.value = totalDetune;
+        audioSource.connect(dest);
+        audioStream = dest.stream;
+      }
+    } catch (_) { audioCtx = null; }
+  }
+
   const expCanvas = document.createElement('canvas');
   expCanvas.width  = outW;
   expCanvas.height = outH;
@@ -730,17 +864,22 @@ async function startExport() {
   document.body.appendChild(expCanvas);
   const expCtx = expCanvas.getContext('2d');
 
-  // Determine best supported codec
-  const mimeTypes = [
-    'video/webm;codecs=vp9',
-    'video/webm;codecs=vp8',
-    'video/webm',
-  ];
-  let mimeType = mimeTypes.find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
+  const hasAudio = !!audioStream;
+  const mimeTypes = hasAudio
+    ? ['video/mp4;codecs=avc1,mp4a.40.2','video/mp4','video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm']
+    : ['video/mp4;codecs=avc1','video/mp4','video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'];
+  const mimeType = mimeTypes.find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
+  const ext      = mimeType.startsWith('video/mp4') ? 'mp4' : 'webm';
 
-  const stream = expCanvas.captureStream(fps);
-  const videoTrack = stream.getVideoTracks()[0];
-  const recorder = new MediaRecorder(stream, {
+  const fps        = Math.round(1000 / S.frameMs);
+  const videoStream = expCanvas.captureStream(fps);
+  const videoTrack  = videoStream.getVideoTracks()[0];
+
+  const combinedStream = hasAudio
+    ? new MediaStream([...videoStream.getVideoTracks(), ...audioStream.getAudioTracks()])
+    : videoStream;
+
+  const recorder = new MediaRecorder(combinedStream, {
     mimeType,
     videoBitsPerSecond: 5_000_000,
   });
@@ -749,36 +888,35 @@ async function startExport() {
   recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
 
   S.recording = true;
-  exportBtn.textContent = '⏹ STOP REC';
+  exportBtn.textContent = '⏹ STOP';
   exportBtn.classList.add('recording');
-  setStatus(`Recording: ${N} frame pairs at ${fps}fps…`);
+  const audioTag = hasAudio ? ' + audio' : '';
+  setStatus(`Recording ${fps}fps${audioTag}…`);
   setProgress(0);
   progressWrap.style.display = 'block';
 
+  if (audioSource) audioSource.start(0);
   recorder.start();
-
-  // Compute draw offsets for the export canvas
-  const leftX  = -S.halfDx - cropPx;
-  const rightX =  S.halfDx - cropPx;
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+  function drawFrameToExport(bitmap, isLeft) {
+    expCtx.clearRect(0, 0, outW, outH);
+    expCtx.drawImage(bitmap, isLeft ? leftX : rightX, 0);
+  }
+
   for (let i = 0; i < N && S.recording; i++) {
-    // Left frame
     try {
       const lb = await buf2bitmap(S.leftFrames[i]);
-      expCtx.clearRect(0, 0, outW, outH);
-      expCtx.drawImage(lb, leftX, 0);
+      drawFrameToExport(lb, true);
       lb.close();
       if (videoTrack.requestFrame) videoTrack.requestFrame();
     } catch (_) {}
     await sleep(S.frameMs);
 
-    // Right frame
     try {
       const rb = await buf2bitmap(S.rightFrames[i]);
-      expCtx.clearRect(0, 0, outW, outH);
-      expCtx.drawImage(rb, rightX, 0);
+      drawFrameToExport(rb, false);
       rb.close();
       if (videoTrack.requestFrame) videoTrack.requestFrame();
     } catch (_) {}
@@ -788,11 +926,13 @@ async function startExport() {
   }
 
   recorder.stop();
+  if (audioSource) try { audioSource.stop(); } catch (_) {}
+  if (audioCtx)    audioCtx.close();
   await new Promise(r => { recorder.onstop = r; });
   document.body.removeChild(expCanvas);
 
   S.recording = false;
-  exportBtn.textContent = '⬇ EXPORT WEBM';
+  exportBtn.textContent = '⬇ EXPORT';
   exportBtn.classList.remove('recording');
   setProgress(-1);
 
@@ -801,18 +941,18 @@ async function startExport() {
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href     = url;
-    a.download = S.filename + '_wiggle.webm';
+    a.download = `${S.filename}_wiggle.${ext}`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 10000);
-    setStatus(`Exported: ${S.filename}_wiggle.webm (${(blob.size / 1024 / 1024).toFixed(1)} MB)`);
+    setStatus(`Saved: ${S.filename}_wiggle.${ext} (${(blob.size/1024/1024).toFixed(1)} MB)${audioTag}`);
   } else {
-    setStatus('Export failed: no data recorded (try a different browser)');
+    setStatus('Export failed — try a different browser');
   }
 }
 
 function stopExport() {
   S.recording = false;
-  exportBtn.textContent = '⬇ EXPORT WEBM';
+  exportBtn.textContent = '⬇ EXPORT';
   exportBtn.classList.remove('recording');
   setStatus('Export cancelled');
   setProgress(-1);
@@ -828,10 +968,10 @@ async function handleFile(file) {
 
   showOverlay('Parsing AVI…', file.name);
 
-  let leftFrames, rightFrames;
+  let leftFrames, rightFrames, audioChunks;
   try {
     const buf = await file.arrayBuffer();
-    ({ leftFrames, rightFrames } = parseAVI(buf));
+    ({ leftFrames, rightFrames, audioChunks } = parseAVI(buf));
   } catch (err) {
     hideOverlay();
     setStatus(`Error: ${err.message}`);
@@ -840,9 +980,29 @@ async function handleFile(file) {
 
   S.leftFrames  = leftFrames;
   S.rightFrames = rightFrames;
+  S.audioChunks = audioChunks;
 
   const N   = leftFrames.length;
   const dur = (N / 20).toFixed(2); // 20fps
+
+  if (audioChunks.length > 0) {
+    const sampPerChunk = (audioChunks[0].byteLength - 4) * 2 + 1;
+    S.audioDurMs = (audioChunks.length * sampPerChunk / 16000) * 1000;
+    S.syncMs     = Math.round(S.audioDurMs / (N * 2));
+    syncBtn.style.display  = '';
+    syncBtn.textContent    = `SYNC SPEED (${S.syncMs}ms)`;
+    syncHint.style.display = '';
+    syncHint.textContent   = `audio: ${(S.audioDurMs / 1000).toFixed(1)}s`;
+  } else {
+    S.audioDurMs = 0;
+    S.syncMs     = 0;
+    syncBtn.style.display  = 'none';
+    syncHint.style.display = 'none';
+  }
+
+  audioBtn.style.display = audioChunks.length > 0 ? '' : 'none';
+  audioBtn.classList.toggle('active', S.audioOn);
+  audioRow.classList.add('visible');
 
   fcDisplay.textContent  = N;
   durDisplay.textContent = `${dur}s`;
@@ -941,6 +1101,40 @@ window.addEventListener('resize', () => {
   if (focalSvg.style.display !== 'none' && S.focalImgX !== undefined) {
     drawFocalMarker(S.focalImgX, S.focalImgY);
   }
+});
+
+// Audio toggle
+audioBtn.addEventListener('click', () => {
+  S.audioOn = !S.audioOn;
+  audioBtn.classList.toggle('active', S.audioOn);
+  audioBtn.textContent = (S.audioOn ? '🔊' : '🔇') + ' ' + (S.audioOn ? 'ON' : 'OFF');
+});
+
+// Preserve pitch toggle
+preservePitchBtn.addEventListener('click', () => {
+  S.preservePitch = !S.preservePitch;
+  preservePitchBtn.classList.toggle('active', S.preservePitch);
+});
+
+// Pitch slider
+pitchSlider.addEventListener('input', () => {
+  S.pitchSemitones = parseInt(pitchSlider.value);
+  const sign = S.pitchSemitones > 0 ? '+' : '';
+  pitchDisplay.textContent = `${sign}${S.pitchSemitones} st`;
+});
+
+// Format: Original
+});
+
+});
+
+// Sync speed: set frameMs so output duration = audio duration
+syncBtn.addEventListener('click', () => {
+  if (!S.syncMs) return;
+  S.frameMs = S.syncMs;
+  speedSlider.value = Math.min(400, Math.max(10, S.syncMs));
+  speedDisplay.textContent = S.syncMs + 'ms';
+  setStatus(`Speed set to ${S.syncMs}ms — audio will sync with video`);
 });
 
 // Play button
