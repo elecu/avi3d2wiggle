@@ -271,6 +271,36 @@ button:disabled { opacity: .3; cursor: default; }
 }
 #enhRow.visible { display: flex; }
 
+#mpoRow {
+  background: var(--s2);
+  border-bottom: 1px solid var(--bdr);
+  padding: 8px 18px;
+  display: none;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+#mpoRow.visible { display: flex; }
+.mpo-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--violet);
+  white-space: nowrap;
+  border: 1px solid var(--violet);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+.btn-mpo-export {
+  background: var(--violet);
+  color: #000;
+  border-color: var(--violet);
+  font-weight: 700;
+}
+.btn-mpo-export.recording { background: var(--red); border-color: var(--red); color: #fff; }
+.btn-mpo-export:disabled  { opacity: .3; cursor: default; }
+
 /* ── STATUS BAR ──────────────────────────── */
 .statusbar {
   background: var(--s2);
@@ -344,11 +374,11 @@ button:disabled { opacity: .3; cursor: default; }
 
 <div id="dropzone">
   <div class="dz-icon">🎮</div>
-  <h2>Drop your 3DS AVI file here</h2>
-  <p>Supports stereo AVI files recorded with the Nintendo 3DS outer cameras<br>
-     (files containing two MJPEG streams: left eye · right eye)</p>
+  <h2>Drop your 3DS file here</h2>
+  <p>Stereo AVI video (two MJPEG streams: left eye · right eye)<br>
+     or MPO stereo photo (.mpo) from the 3DS outer cameras</p>
   <small>Processing is done entirely in your browser — no server, no upload</small>
-  <input type="file" id="fileInput" accept=".avi,.AVI">
+  <input type="file" id="fileInput" accept=".avi,.AVI,.mpo,.MPO">
 </div>
 
 <div id="app">
@@ -458,6 +488,25 @@ button:disabled { opacity: .3; cursor: default; }
     <button id="enhResetBtn" class="tbtn">RESET</button>
   </div>
 
+  <!-- MPO image options row (shown only for .mpo files) -->
+  <div id="mpoRow">
+    <span class="mpo-label">MPO PHOTO</span>
+    <div class="sep"></div>
+    <div class="cgroup">
+      <span class="clabel">Format</span>
+      <button id="mpoGifBtn" class="tbtn active">GIF ∞</button>
+      <button id="mpoMp4Btn" class="tbtn">MP4</button>
+    </div>
+    <div class="sep"></div>
+    <div class="cgroup" id="mpoDurGroup" style="display:none">
+      <span class="clabel">Duration</span>
+      <input type="range" id="mpoDurSlider" min="1" max="30" value="3" step="1">
+      <span class="cval" id="mpoDurDisplay">3s</span>
+    </div>
+    <div class="sep" id="mpoDurSep" style="display:none"></div>
+    <button id="mpoExportBtn" class="btn-mpo-export" disabled>⬇ EXPORT GIF</button>
+  </div>
+
   <!-- Status -->
   <div class="statusbar">
     <span id="statusMsg">Initialising…</span>
@@ -480,6 +529,8 @@ button:disabled { opacity: .3; cursor: default; }
 const S = {
   leftFrames:  [],   // Array<ArrayBuffer> raw JPEG bytes, left eye
   rightFrames: [],   // Array<ArrayBuffer> raw JPEG bytes, right eye
+  imgW:     480,     // active image width  (480 for AVI, actual dims for MPO)
+  imgH:     240,     // active image height
   halfDx:   0,       // half the stereo disparity (pixels); positive = shift right frame right
   cropPx:   0,       // pixels to crop each side when crop enabled
   cropOn:   true,
@@ -490,6 +541,8 @@ const S = {
   filename: 'wiggle',
   playTimer: null,
   playIdx:  0,       // 0..2N-1, even=left odd=right
+  previewActx:   null,
+  previewSource: null,
   audioChunks: [],   // Array<ArrayBuffer> raw IMA ADPCM blocks (01wb)
   audioOn:  true,    // include audio in export
   preservePitch: true, // compensate pitch when time-stretching
@@ -778,9 +831,10 @@ function applyBestDx(bestDx) {
 }
 
 function updateOutputSize() {
-  const w = S.cropOn ? (480 - 2 * S.cropPx) : 480;
-  outSizeDisplay.textContent = `${w}×240`;
-  pc.width = Math.max(16, w);
+  const w = S.cropOn ? (S.imgW - 2 * S.cropPx) : S.imgW;
+  outSizeDisplay.textContent = `${w}×${S.imgH}`;
+  pc.width  = Math.max(16, w);
+  pc.height = S.imgH;
 }
 
 // ─── DRAW HELPERS ────────────────────────────────────────────────────────────
@@ -808,10 +862,10 @@ async function showFirstFrames() {
   const lb = await buf2bitmap(S.leftFrames[0]);
   const rb = await buf2bitmap(S.rightFrames[0]);
 
-  lCtx.clearRect(0, 0, 480, 240);
+  lCtx.clearRect(0, 0, S.imgW, S.imgH);
   lCtx.drawImage(lb, 0, 0);
 
-  rCtx.clearRect(0, 0, 480, 240);
+  rCtx.clearRect(0, 0, S.imgW, S.imgH);
   rCtx.drawImage(rb, 0, 0);
 
   // Preview: show wiggle of first frame
@@ -837,8 +891,8 @@ function drawFocalMarker(imgX, imgY) {
   const offX = lcRect.left - boxRect.left;
   const offY = lcRect.top  - boxRect.top;
 
-  const scaleX = lcRect.width  / 480;
-  const scaleY = lcRect.height / 240;
+  const scaleX = lcRect.width  / S.imgW;
+  const scaleY = lcRect.height / S.imgH;
 
   const cx = offX + imgX * scaleX;
   const cy = offY + imgY * scaleY;
@@ -928,6 +982,30 @@ function startPlay() {
   playBtn.textContent = '■ STOP';
   playBtn.classList.add('running');
   playStep();
+
+  // Audio preview
+  if (S.audioOn && S.audioChunks.length) {
+    try {
+      const decoded = decodeAllAudio(S.audioChunks);
+      if (decoded) {
+        S.previewActx   = decoded.actx;
+        S.previewSource = decoded.actx.createBufferSource();
+        S.previewSource.buffer = decoded.abuf;
+        S.previewSource.loop   = true;
+
+        const videoDurMs   = S.leftFrames.length * 2 * S.frameMs;
+        const playbackRate = Math.max(0.1, Math.min(10,
+          decoded.duration * 1000 / videoDurMs
+        ));
+        const rateCompCents = S.preservePitch
+          ? -Math.round(Math.log2(playbackRate) * 1200) : 0;
+        S.previewSource.playbackRate.value = playbackRate;
+        S.previewSource.detune.value = rateCompCents + S.pitchSemitones * 100;
+        S.previewSource.connect(decoded.actx.destination);
+        S.previewSource.start(0);
+      }
+    } catch (_) {}
+  }
 }
 
 function stopPlay() {
@@ -935,6 +1013,15 @@ function stopPlay() {
   if (S.playTimer) clearTimeout(S.playTimer);
   playBtn.textContent = '▶ PREVIEW';
   playBtn.classList.remove('running');
+
+  if (S.previewSource) {
+    try { S.previewSource.stop(); } catch (_) {}
+    S.previewSource = null;
+  }
+  if (S.previewActx) {
+    S.previewActx.close();
+    S.previewActx = null;
+  }
 }
 
 // ─── EXPORT (MediaRecorder + canvas captureStream) ────────────────────────────
@@ -1084,6 +1171,7 @@ function stopExport() {
 
 // ─── MAIN FILE HANDLER ────────────────────────────────────────────────────────
 async function handleFile(file) {
+  if (/\.mpo$/i.test(file.name)) { await handleMPO(file); return; }
   stopPlay();
   stopExport();
 
@@ -1138,10 +1226,15 @@ async function handleFile(file) {
   speedSlider.value = Math.min(400, Math.max(10, S.syncMs));
   speedDisplay.textContent = S.syncMs + 'ms';
 
+  S.imgW = 480; S.imgH = 240;
+  lc.width = 480; lc.height = 240;
+  rc.width = 480; rc.height = 240;
   audioBtn.style.display = audioChunks.length > 0 ? '' : 'none';
   audioBtn.classList.toggle('active', S.audioOn);
   audioRow.classList.add('visible');
   enhRow.classList.add('visible');
+  mpoRow.classList.remove('visible');
+  exportBtn.disabled = false;
 
   fcDisplay.textContent  = N;
   durDisplay.textContent = `${dur}s`;
@@ -1223,8 +1316,8 @@ lc.addEventListener('click', async e => {
   autoFocalBtn.classList.remove('active');
 
   const rect   = lc.getBoundingClientRect();
-  const imgX   = Math.round(e.offsetX * (480 / rect.width));
-  const imgY   = Math.round(e.offsetY * (240 / rect.height));
+  const imgX   = Math.round(e.offsetX * (S.imgW / rect.width));
+  const imgY   = Math.round(e.offsetY * (S.imgH / rect.height));
 
   drawFocalMarker(imgX, imgY);
   setStatus(`Computing focal shift at (${imgX}, ${imgY})…`);
@@ -1339,6 +1432,501 @@ playBtn.addEventListener('click', () => {
 exportBtn.addEventListener('click', () => {
   if (S.recording) stopExport();
   else             startExport();
+});
+
+// ─── MPO SUPPORT ─────────────────────────────────────────────────────────────
+// MPO (Multi Picture Object) = two JPEG images concatenated.
+// The 3DS stores left eye as image 1, right eye as image 2.
+// We walk JPEG markers properly to skip APP1 EXIF thumbnails before finding
+// the real second image SOI.
+
+const mpoRow       = document.getElementById('mpoRow');
+const mpoGifBtn    = document.getElementById('mpoGifBtn');
+const mpoMp4Btn    = document.getElementById('mpoMp4Btn');
+const mpoDurGroup  = document.getElementById('mpoDurGroup');
+const mpoDurSep    = document.getElementById('mpoDurSep');
+const mpoDurSlider = document.getElementById('mpoDurSlider');
+const mpoDurDisplay= document.getElementById('mpoDurDisplay');
+const mpoExportBtn = document.getElementById('mpoExportBtn');
+
+// MPO state (extends S)
+S.mpoMode      = false;
+S.mpoDurS      = 3;
+S.mpoFormat    = 'gif'; // 'gif' | 'mp4'
+S.mpoRecording = false;
+
+// Walk JPEG markers to find the byte offset right after the first JPEG EOI.
+// This correctly skips embedded EXIF thumbnails (FF D8 inside APP1/APP2 data).
+function firstJpegEnd(bytes, view) {
+  let p = 2; // skip initial SOI FF D8
+  while (p < bytes.length - 1) {
+    if (bytes[p] !== 0xFF) break;
+    const m = bytes[p + 1];
+    // Markers with no length field
+    if (m === 0xD8) { p += 2; continue; }          // nested SOI (unusual)
+    if (m === 0xD9) return p + 2;                   // EOI — end of first JPEG
+    if (m >= 0xD0 && m <= 0xD7) { p += 2; continue; } // Dnn restart
+    if (m === 0x01) { p += 2; continue; }           // TEM
+    if (p + 3 >= bytes.length) break;
+    const segLen = view.getUint16(p + 2, false);    // big-endian length incl. length bytes
+    if (m === 0xDA) {
+      // SOS: skip header, then scan entropy-coded data for EOI (FF D9)
+      p += 2 + segLen;
+      while (p < bytes.length - 1) {
+        if (bytes[p] === 0xFF) {
+          const n = bytes[p + 1];
+          if (n === 0x00 || (n >= 0xD0 && n <= 0xD7)) { p += 2; continue; }
+          if (n === 0xD9) return p + 2; // EOI found
+          break; // some other marker — unexpected but bail
+        }
+        p++;
+      }
+      break;
+    }
+    p += 2 + segLen;
+  }
+  return -1;
+}
+
+function parseMPO(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const view  = new DataView(buffer);
+  // Strategy 1: walk markers to find EOI of first JPEG, second image starts there
+  const split = firstJpegEnd(bytes, view);
+  if (split > 0 && split < bytes.length - 1 &&
+      bytes[split] === 0xFF && bytes[split + 1] === 0xD8) {
+    return { leftBuf: buffer.slice(0, split), rightBuf: buffer.slice(split) };
+  }
+  // Strategy 2: scan for APP2 MPF marker to get explicit offset
+  let p = 2;
+  while (p < bytes.length - 3) {
+    if (bytes[p] !== 0xFF) break;
+    const m = bytes[p + 1];
+    if (m === 0xDA || m === 0xD9) break;
+    if (p + 3 >= bytes.length) break;
+    const segLen = view.getUint16(p + 2, false);
+    if (m === 0xE2 && segLen >= 10 &&
+        bytes[p+4]===0x4D && bytes[p+5]===0x50 && bytes[p+6]===0x46 && bytes[p+7]===0x00) {
+      // Found MPF APP2 — parse TIFF-like IFD
+      const base = p + 8; // right after "MPF\0"
+      const le   = bytes[base] === 0x49;
+      const u16  = o => le ? view.getUint16(base+o,true)  : view.getUint16(base+o,false);
+      const u32  = o => le ? view.getUint32(base+o,true)  : view.getUint32(base+o,false);
+      const ifd  = u32(4);
+      const cnt  = u16(ifd);
+      for (let i = 0; i < cnt; i++) {
+        const e = ifd + 2 + i * 12;
+        if (u16(e) === 0xB002) { // MP Entry tag
+          const numImg = u32(e + 4);
+          if (numImg >= 2) {
+            const entryValOff = u32(e + 8);         // offset from base
+            const img2Off     = u32(entryValOff + 16 + 8); // second entry, data offset field
+            if (img2Off > 0) {
+              const abs = base + img2Off;
+              return { leftBuf: buffer.slice(0, abs), rightBuf: buffer.slice(abs) };
+            }
+          }
+          break;
+        }
+      }
+    }
+    p += 2 + segLen;
+  }
+  throw new Error('MPO: could not locate second JPEG — is this a valid 3DS MPO file?');
+}
+
+// ─── INLINE ANIMATED GIF ENCODER ─────────────────────────────────────────────
+// Self-contained, no CDN/worker needed. Works from file:// protocol.
+// Supports N frames, per-frame delay, infinite loop.
+// Color quantization: median-cut to 256 colors.
+
+function makeAnimGIF(canvasList, delayMs) {
+  const W = canvasList[0].width, H = canvasList[0].height;
+
+  // ── Step 1: gather all pixel data ──────────────────────────────────────────
+  const frameData = canvasList.map(c => c.getContext('2d').getImageData(0, 0, W, H).data);
+
+  // ── Step 2: build global palette via median cut ───────────────────────────
+  // Collect a sample of pixels (every 4th pixel from all frames)
+  const samples = [];
+  for (const d of frameData)
+    for (let i = 0; i < d.length; i += 16) samples.push([d[i], d[i+1], d[i+2]]);
+
+  function medianCut(pixels, depth) {
+    if (depth === 0 || pixels.length === 0) {
+      let r=0,g=0,b=0;
+      for (const p of pixels) { r+=p[0]; g+=p[1]; b+=p[2]; }
+      const n = pixels.length || 1;
+      return [[Math.round(r/n), Math.round(g/n), Math.round(b/n)]];
+    }
+    let minR=255,maxR=0,minG=255,maxG=0,minB=255,maxB=0;
+    for (const p of pixels) {
+      if(p[0]<minR)minR=p[0]; if(p[0]>maxR)maxR=p[0];
+      if(p[1]<minG)minG=p[1]; if(p[1]>maxG)maxG=p[1];
+      if(p[2]<minB)minB=p[2]; if(p[2]>maxB)maxB=p[2];
+    }
+    const rR=maxR-minR, rG=maxG-minG, rB=maxB-minB;
+    const ch = rR>=rG&&rR>=rB ? 0 : rG>=rB ? 1 : 2;
+    pixels.sort((a,b)=>a[ch]-b[ch]);
+    const mid = pixels.length>>1;
+    return [
+      ...medianCut(pixels.slice(0,mid), depth-1),
+      ...medianCut(pixels.slice(mid),   depth-1),
+    ];
+  }
+
+  const palette = medianCut(samples, 8); // 256 colors
+  while (palette.length < 256) palette.push([0,0,0]);
+
+  // Build fast nearest-color lookup (cache by 15-bit key r>>3 g>>3 b>>3)
+  const nearCache = new Map();
+  function nearestIdx(r,g,b) {
+    const key = (r>>3<<10)|(g>>3<<5)|(b>>3);
+    if (nearCache.has(key)) return nearCache.get(key);
+    let best=0, bestD=Infinity;
+    for (let i=0;i<256;i++) {
+      const p=palette[i], dr=r-p[0],dg=g-p[1],db=b-p[2];
+      const d=dr*dr+dg*dg+db*db;
+      if(d<bestD){bestD=d;best=i;}
+    }
+    nearCache.set(key,best);
+    return best;
+  }
+
+  // ── Step 3: quantize each frame ───────────────────────────────────────────
+  const quantFrames = frameData.map(d => {
+    const out = new Uint8Array(W*H);
+    for (let i=0;i<W*H;i++) out[i]=nearestIdx(d[i*4],d[i*4+1],d[i*4+2]);
+    return out;
+  });
+
+  // ── Step 4: LZW compress ──────────────────────────────────────────────────
+  function lzwCompress(indices, minSize) {
+    const clear=1<<minSize, eof=clear+1;
+    let codeSize=minSize+1, maxCode=1<<codeSize;
+    const out=[]; let buf=0, bufBits=0;
+    const emit = v => {
+      buf|=v<<bufBits; bufBits+=codeSize;
+      while(bufBits>=8){out.push(buf&0xFF);buf>>=8;bufBits-=8;}
+    };
+    // table: key = (prefix<<8)|suffix, value = code
+    let table = new Map();
+    const resetTable = () => {
+      table.clear();
+      for(let i=0;i<clear+2;i++) table.set(i,i);
+    };
+    resetTable();
+    let nextCode=clear+2;
+    emit(clear);
+    let prefix=-1;
+    for(const idx of indices){
+      if(prefix===-1){prefix=idx;continue;}
+      const key=(prefix<<8)|idx;
+      if(table.has(key)){
+        prefix=table.get(key);
+      } else {
+        emit(prefix);
+        if(nextCode<4096){
+          table.set(key,nextCode++);
+          if(nextCode>maxCode&&codeSize<12){codeSize++;maxCode<<=1;}
+        } else {
+          emit(clear); resetTable();
+          nextCode=clear+2; codeSize=minSize+1; maxCode=1<<codeSize;
+        }
+        prefix=idx;
+      }
+    }
+    if(prefix!==-1) emit(prefix);
+    emit(eof);
+    if(bufBits>0) out.push(buf&0xFF);
+    return out;
+  }
+
+  // ── Step 5: assemble GIF bytes ────────────────────────────────────────────
+  const out = [];
+  const wb  = v => out.push(v&0xFF);
+  const w2  = v => { wb(v); wb(v>>8); };
+  const wBytes = arr => { for(const b of arr) wb(b); };
+  const wStr   = s  => { for(let i=0;i<s.length;i++) wb(s.charCodeAt(i)); };
+
+  // Header
+  wStr('GIF89a');
+  w2(W); w2(H);
+  wb(0xF7); // global CT flag + color depth 8-bit (256 colors)
+  wb(0);    // background color index
+  wb(0);    // pixel aspect ratio
+
+  // Global Color Table (256 × 3 bytes)
+  for(const [r,g,b] of palette){ wb(r);wb(g);wb(b); }
+
+  // Netscape loop extension (infinite)
+  wBytes([0x21,0xFF,0x0B]);
+  wStr('NETSCAPE2.0');
+  wBytes([0x03,0x01]);
+  w2(0); // loop count 0 = infinite
+  wb(0);
+
+  const delayCs = Math.round(delayMs / 10); // centiseconds
+
+  for(const indices of quantFrames) {
+    // Graphic Control Extension
+    wBytes([0x21,0xF9,0x04]);
+    wb(0x00); // disposal: do not dispose, no user input, no transparent
+    w2(delayCs);
+    wb(0); // transparent color index (unused)
+    wb(0); // block terminator
+
+    // Image Descriptor
+    wb(0x2C);
+    w2(0); w2(0); w2(W); w2(H);
+    wb(0); // no local CT, not interlaced
+
+    // Image Data
+    const minSize = 8;
+    wb(minSize);
+    const compressed = lzwCompress(indices, minSize);
+    // Split into sub-blocks of max 255 bytes
+    let ci = 0;
+    while(ci < compressed.length) {
+      const blockLen = Math.min(255, compressed.length - ci);
+      wb(blockLen);
+      for(let j=0;j<blockLen;j++) wb(compressed[ci++]);
+    }
+    wb(0); // block terminator
+  }
+
+  wb(0x3B); // GIF trailer
+
+  return new Blob([new Uint8Array(out)], { type: 'image/gif' });
+}
+
+async function handleMPO(file) {
+  stopPlay();
+  if (S.mpoRecording) stopMPOExport();
+
+  focalSvg.style.display = 'none';
+  S.focalImgX = S.focalImgY = undefined;
+  S.autoFocal = true;
+  autoFocalBtn.classList.add('active');
+
+  S.mpoMode  = true;
+  S.filename = file.name.replace(/\.[^.]+$/, '');
+
+  dz.style.display  = 'none';
+  app.style.display = 'flex';
+  showOverlay('Parsing MPO…', file.name);
+
+  let leftBuf, rightBuf;
+  try {
+    const buf = await file.arrayBuffer();
+    ({ leftBuf, rightBuf } = parseMPO(buf));
+  } catch (err) {
+    hideOverlay();
+    setStatus(`Error: ${err.message}`);
+    return;
+  }
+
+  S.leftFrames  = [leftBuf];
+  S.rightFrames = [rightBuf];
+  S.audioChunks = [];
+
+  // Detect actual image dimensions and resize canvases
+  const dimBm = await buf2bitmap(leftBuf);
+  S.imgW = dimBm.width; S.imgH = dimBm.height;
+  dimBm.close();
+  lc.width = S.imgW; lc.height = S.imgH;
+  rc.width = S.imgW; rc.height = S.imgH;
+  pc.width = S.imgW; pc.height = S.imgH;
+
+  overlayMsg.textContent    = 'Computing stereo alignment…';
+  overlayDetail.textContent = 'SAD block matching';
+
+  let bestDx;
+  try { bestDx = await autoShift(leftBuf, rightBuf); }
+  catch (_) { bestDx = 0; }
+  applyBestDx(bestDx);
+
+  overlayMsg.textContent    = 'Decoding preview…';
+  overlayDetail.textContent = '';
+  await showFirstFrames();
+  hideOverlay();
+
+  fcDisplay.textContent  = '1 (MPO)';
+  durDisplay.textContent = '—';
+
+  // Show MPO row, hide AVI-only rows
+  audioRow.classList.remove('visible');
+  enhRow.classList.add('visible');
+  mpoRow.classList.add('visible');
+
+  // Main export button not applicable for MPO
+  playBtn.disabled   = false;
+  exportBtn.disabled = true;
+  mpoExportBtn.disabled = false;
+
+  setStatus(`MPO loaded · disparity ~${Math.abs(bestDx)}px · halfDx=${S.halfDx}px`);
+}
+
+async function exportMPOAsGIF() {
+  const cropPx = S.cropOn ? S.cropPx : 0;
+  const outW   = Math.max(16, S.imgW - 2 * cropPx);
+  const outH   = S.imgH;
+  const leftX  = -S.halfDx - cropPx;
+  const rightX =  S.halfDx - cropPx;
+
+  mpoExportBtn.disabled    = true;
+  mpoExportBtn.textContent = '⏳ ENCODING…';
+  setStatus('Encoding GIF…');
+  setProgress(0.1);
+  progressWrap.style.display = 'block';
+
+  // Render both frames onto off-screen canvases
+  const makeFrame = async (buf, drawX) => {
+    const c   = document.createElement('canvas');
+    c.width   = outW; c.height = outH;
+    const ctx = c.getContext('2d');
+    const bm  = await buf2bitmap(buf);
+    ctx.drawImage(bm, drawX, 0);
+    bm.close();
+    applyEnhancement(ctx, outW, outH);
+    return c;
+  };
+
+  const [cLeft, cRight] = await Promise.all([
+    makeFrame(S.leftFrames[0],  leftX),
+    makeFrame(S.rightFrames[0], rightX),
+  ]);
+
+  setProgress(0.4);
+  // Yield to let the UI update before heavy encoding
+  await new Promise(r => setTimeout(r, 0));
+
+  const blob = makeAnimGIF([cLeft, cRight], S.frameMs);
+
+  setProgress(1);
+  const url = URL.createObjectURL(blob);
+  const a   = document.createElement('a');
+  a.href = url; a.download = `${S.filename}_wiggle.gif`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  setStatus(`Saved: ${S.filename}_wiggle.gif · ${(blob.size / 1024).toFixed(0)} KB · ${S.frameMs}ms/frame`);
+  setProgress(-1);
+  mpoExportBtn.disabled    = false;
+  mpoExportBtn.textContent = '⬇ EXPORT GIF';
+}
+
+async function exportMPOAsVideo() {
+  if (S.mpoRecording) return;
+  const cropPx = S.cropOn ? S.cropPx : 0;
+  const outW   = Math.max(16, S.imgW - 2 * cropPx);
+  const outH   = S.imgH;
+  const leftX  = -S.halfDx - cropPx;
+  const rightX =  S.halfDx - cropPx;
+
+  const expCanvas = document.createElement('canvas');
+  expCanvas.width = outW; expCanvas.height = outH;
+  expCanvas.style.cssText = 'position:fixed;top:-9999px;left:-9999px;';
+  document.body.appendChild(expCanvas);
+  const expCtx = expCanvas.getContext('2d');
+
+  const fps       = Math.round(1000 / S.frameMs);
+  const mimeTypes = ['video/mp4;codecs=avc1','video/mp4','video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'];
+  const mimeType  = mimeTypes.find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
+  const ext       = mimeType.startsWith('video/mp4') ? 'mp4' : 'webm';
+
+  const videoStream = expCanvas.captureStream(fps);
+  const videoTrack  = videoStream.getVideoTracks()[0];
+  const recorder    = new MediaRecorder(videoStream, { mimeType, videoBitsPerSecond: 5_000_000 });
+  const chunks      = [];
+  recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+
+  S.mpoRecording = true;
+  mpoExportBtn.textContent = '⏹ STOP';
+  mpoExportBtn.classList.add('recording');
+  setStatus(`Recording MPO wiggle ${fps}fps · ${S.mpoDurS}s…`);
+  setProgress(0);
+  progressWrap.style.display = 'block';
+  recorder.start();
+
+  const sleep       = ms => new Promise(r => setTimeout(r, ms));
+  const totalFrames = Math.round((S.mpoDurS * 1000) / S.frameMs);
+
+  const lb = await buf2bitmap(S.leftFrames[0]);
+  const rb = await buf2bitmap(S.rightFrames[0]);
+
+  for (let i = 0; i < totalFrames && S.mpoRecording; i++) {
+    const isLeft = (i % 2) === 0;
+    expCtx.clearRect(0, 0, outW, outH);
+    expCtx.drawImage(isLeft ? lb : rb, isLeft ? leftX : rightX, 0);
+    applyEnhancement(expCtx, outW, outH);
+    if (videoTrack.requestFrame) videoTrack.requestFrame();
+    await sleep(S.frameMs);
+    setProgress((i + 1) / totalFrames);
+  }
+
+  lb.close(); rb.close();
+  recorder.stop();
+  await new Promise(r => { recorder.onstop = r; });
+  document.body.removeChild(expCanvas);
+
+  S.mpoRecording = false;
+  mpoExportBtn.textContent = '⬇ EXPORT MP4';
+  mpoExportBtn.classList.remove('recording');
+  setProgress(-1);
+
+  if (chunks.length > 0) {
+    const blob = new Blob(chunks, { type: mimeType });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url; a.download = `${S.filename}_wiggle.${ext}`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    setStatus(`Saved: ${S.filename}_wiggle.${ext} · ${(blob.size / 1024 / 1024).toFixed(1)} MB · ${S.mpoDurS}s`);
+  } else {
+    setStatus('Export failed — try a different browser');
+  }
+}
+
+function stopMPOExport() {
+  S.mpoRecording = false;
+  mpoExportBtn.textContent = '⬇ EXPORT MP4';
+  mpoExportBtn.classList.remove('recording');
+  setStatus('MPO export cancelled');
+  setProgress(-1);
+}
+
+// ─── MPO UI EVENT HANDLERS ───────────────────────────────────────────────────
+
+mpoGifBtn.addEventListener('click', () => {
+  S.mpoFormat = 'gif';
+  mpoGifBtn.classList.add('active');
+  mpoMp4Btn.classList.remove('active');
+  mpoDurGroup.style.display = 'none';
+  mpoDurSep.style.display   = 'none';
+  mpoExportBtn.textContent  = '⬇ EXPORT GIF';
+});
+
+mpoMp4Btn.addEventListener('click', () => {
+  S.mpoFormat = 'mp4';
+  mpoMp4Btn.classList.add('active');
+  mpoGifBtn.classList.remove('active');
+  mpoDurGroup.style.display = '';
+  mpoDurSep.style.display   = '';
+  mpoExportBtn.textContent  = '⬇ EXPORT MP4';
+});
+
+mpoDurSlider.addEventListener('input', () => {
+  S.mpoDurS = parseInt(mpoDurSlider.value);
+  mpoDurDisplay.textContent = S.mpoDurS + 's';
+});
+
+mpoExportBtn.addEventListener('click', () => {
+  if (S.mpoFormat === 'gif') {
+    exportMPOAsGIF();
+  } else {
+    if (S.mpoRecording) stopMPOExport();
+    else                exportMPOAsVideo();
+  }
 });
 </script>
 </body>
